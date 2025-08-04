@@ -1,1 +1,564 @@
-#Please find code for qunaittation of biomarkers here
+# Creation of peak area/internal standard results from skyline output
+# Creation of peak area/internal standard results from skyline output
+library(dplyr)
+library(readr)
+
+# Read CSV, ensure Area is numeric
+data <- read_csv("Molecule Transition Results_food_fecal_neat.csv", show_col_types = FALSE)
+
+# Step 3: Normalize to IS (sulfadimethoxine) and calculate ratios
+data_1 <- data %>%
+  group_by(`Replicate Name`) %>%
+  mutate(
+    IS_value = Area[Molecule == "sulfadimethoxine"][1],
+    Area_Ratio = ifelse(!is.na(IS_value) & IS_value != 0, Area / IS_value, NA)
+  ) %>%
+  ungroup() %>%
+  
+  # Assign Pool
+  mutate(
+    Pool_Assignment = case_when(
+      grepl("poolS", `Replicate Name`) ~ "spk_fecal",
+      grepl("poolP", `Replicate Name`) ~ "spk_plasma",
+      grepl("poolF", `Replicate Name`) ~ "spk_food",
+      grepl("FMstandards", `Replicate Name`) ~ "neat",
+      TRUE ~ "Other"
+    ),
+    
+    # Assign nM values based on pattern matching
+    nM_Value = case_when(
+      grepl("nsp_pool", `Replicate Name`) ~ 0,
+      grepl("100nM", `Replicate Name`) ~ 0.1,
+      grepl("200nM", `Replicate Name`) ~ 0.2,
+      grepl("400nM", `Replicate Name`) ~ 0.4,
+      grepl("600nM", `Replicate Name`) ~ 0.6,
+      grepl("800nM", `Replicate Name`) ~ 0.8,
+      grepl("1uM", `Replicate Name`) ~ 1.0,
+      grepl("2uM", `Replicate Name`) ~ 2.0,
+      grepl("4uM", `Replicate Name`) ~ 4.0,
+      grepl("6uM", `Replicate Name`) ~ 6.0,
+      grepl("10uM", `Replicate Name`) ~ 10.0,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  
+  # Step 4: Calculate adjusted Area Ratio by subtracting the nsp_pool average
+  group_by(Molecule) %>%
+  mutate(
+    nsp_pool_avg_Area_Ratio = mean(Area_Ratio[nM_Value == 0], na.rm = TRUE),
+    adjusted_Area_Ratio = Area_Ratio - nsp_pool_avg_Area_Ratio,
+    adjusted_Area_Ratio = ifelse(adjusted_Area_Ratio < 0, 0, adjusted_Area_Ratio)
+  ) %>%
+  ungroup()
+
+# Filter for specific pools
+results_filtered <- data_1 %>%
+  filter(Pool_Assignment %in% c("spk_food", "spk_fecal"))
+
+
+# Save processed data
+write.csv(data_1, "neat_fecal_food_matrix_area_ratio_pool.csv", row.names = FALSE)
+
+
+
+
+# plot of calibration curve for representation food biomarkers
+# plot of calibration curve for representation food biomarkers
+library(ggplot2)
+library(dplyr)
+library(readr)
+
+# Read in the CSV file containing the data
+data <- read_csv("neat_fecal_food_matrix_area_ratio_pool.csv")
+data <- data %>%
+  filter(!grepl("day", `Replicate Name`))
+
+# Ensure 'nM_Value' and 'adjusted_Area_Ratio' are numeric
+data$nM_Value <- as.numeric(data$nM_Value)
+data$adjusted_Area_Ratio <- as.numeric(data$adjusted_Area_Ratio)
+
+# Filter the data to include only relevant pools (Calibration Sets)
+data_filtered <- data %>%
+  filter(Pool_Assignment %in% c("neat", "spk_food", "spk_plasma"))
+
+# Lowercase your molecule list
+molecules_to_display <- tolower(c(
+  "Alliin", "Advantame", "alpha-Chaconine", 
+  "Cyanidin", "Naringin", "Tomatine", 
+  "Quercetin", "Rutin", "Cobalamin"
+))
+
+# Convert the Molecule column to lowercase before filtering
+data_filtered_analyte <- data_filtered %>%
+  mutate(Molecule = tolower(Molecule)) %>%  # 🔁 ensure match
+  filter(!Molecule %in% c("sulfadimethoxine")) %>%
+  filter(!nM_Value %in% c("8")) %>%
+  filter(!`Replicate Name` %in% c("blank_carryF_1", "blank_carryF_2", "blank_carryF_3", "day2", "da3")) %>%
+  filter(Molecule %in% molecules_to_display)  # ✅ now this should work
+
+# Filter the data for the selected molecules
+data_filtered_analyte <- data_filtered_analyte %>%
+  filter(Molecule %in% molecules_to_display)
+
+# Calculate the standard error for each group (Pool_Assignment, Molecule, and Concentration)
+data_se <- data_filtered_analyte %>%
+  group_by(Pool_Assignment, Molecule, nM_Value) %>%
+  summarize(
+    mean_area_ratio = mean(adjusted_Area_Ratio, na.rm = TRUE),
+    se_area_ratio = sd(adjusted_Area_Ratio, na.rm = TRUE) / sqrt(n())  # Standard error
+  ) %>%
+  ungroup()
+
+# Plot calibration curve with error bars, faceted by Molecule
+p <-ggplot(data_se, aes(x = nM_Value, y = mean_area_ratio, color = Pool_Assignment)) +
+  geom_point(size = 3, alpha = 0.3) +  # Plot points with transparency
+  geom_smooth(method = "lm", se = FALSE, aes(group = Pool_Assignment), size = 1) +  # Fit linear model
+  geom_errorbar(
+    aes(ymin = mean_area_ratio - se_area_ratio, ymax = mean_area_ratio + se_area_ratio), 
+    width = 0.2, size = 1
+  ) +  # Add error bars
+  labs(
+    title = " ",
+    x = "Concentration (µM)",
+    y = "Peak area/ISD"
+  ) +
+  scale_color_manual(values = c("spk_plasma" = "blue", "spk_food" = "orange", "neat" = "red")) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",                # 🔥 Hides the legend
+    panel.grid = element_blank(),            # Remove grid lines
+    axis.line = element_line(color = "black", size = 0.5),  # Add axis lines
+    axis.title.x = element_text(size = 20, color = "black"),
+    axis.title.y = element_text(size = 20, color = "black"),
+    axis.text.x = element_text(size = 20, color = "black"),
+    axis.text.y = element_text(size = 20, color = "black"),
+    strip.text.x = element_text(size = 24, color = "black"),
+    strip.text.y = element_text(size = 20, color = "black"),
+    plot.title = element_text(size = 27, hjust = 0.5)
+  ) +
+  facet_wrap(~ Molecule, scales = "free")  # Facet by Molecule, each with its own x and y axes
+
+print(p)
+
+# Save the plot as a PNG file
+ggsave("9_selected_spk_food_calibration_curve_faceted_by_selected_molecules.png", dpi = 300, width = 11, height =8)
+
+
+
+
+# percent carryover by comparing black inject to the ULOQ
+# percent carryover by comparing black inject to the ULOQ
+library(ggplot2)
+library(dplyr)
+library(readr)
+
+# Read in the CSV file containing the data
+df <- read_csv("Molecule Transition Results_Spk_food_only.csv")
+
+
+# Filter the data to include only relevant pools (Calibration Sets)
+data_filtered <- df %>%
+  filter(`Replicate Name` %in% c("blank_carryF_1", "blank_carryF_2", "blank_carryF_3", "poolF_10uM_1", "poolF_10uM_2", "poolF_10uM_3"))
+
+
+
+# Group by Molecule and calculate the average for relevant replicate names
+averages <- data_filtered %>%
+  group_by(Molecule) %>%
+  summarise(
+    blank_carryF_avg = mean(Area[`Replicate Name` %in% c("blank_carryF_1", "blank_carryF_2", "blank_carryF_3")], na.rm = TRUE),
+    poolF_10uM_avg = mean(Area[`Replicate Name` %in% c("poolF_10uM_1", "poolF_10uM_2", "poolF_10uM_3")], na.rm = TRUE),
+    
+    # Retention Time stats for poolF_10uM
+    retention_mean_poolF = mean(`Retention Time`[`Replicate Name` %in% c("poolF_10uM_1", "poolF_10uM_2", "poolF_10uM_3")], na.rm = TRUE),
+    retention_cv_poolF = (sd(`Retention Time`[`Replicate Name` %in% c("poolF_10uM_1", "poolF_10uM_2", "poolF_10uM_3")], na.rm = TRUE) /
+                            retention_mean_poolF) * 100
+  ) %>%
+  mutate(
+    carryover_percent = (blank_carryF_avg / poolF_10uM_avg) * 100
+  )
+
+
+# Optionally, save the results to a CSV file
+write.csv(averages, "carryover_spkfood.csv", row.names = FALSE)
+
+
+
+# Building calibration curve quadratic equation
+# Building calibration curve quadratic equation
+library(ggplot2)
+library(dplyr)
+library(readr)
+
+# Read in the CSV file containing the data
+df <- read_csv("neat_fecal_food_matrix_area_ratio_pool.csv")
+# Filter the data to include only relevant pools (Calibration Sets)
+
+
+# Filter out the specific molecules and Replicate Names, and exclude specific nM_Value
+data <- df %>%
+  filter(!Molecule %in% c("sulfadimethoxine")) %>%
+  filter(!`Replicate Name` %in% c("blank_carryF_1", "blank_carryF_2", "blank_carryF_3"))
+
+# Ensure 'nM_Value' and 'adjusted_Area_Ratio' are numeric
+data$nM_Value <- as.numeric(data$nM_Value)
+data$adjusted_Area_Ratio <- as.numeric(data$adjusted_Area_Ratio)
+
+
+# Apply low weights to low and high concentrations to prioritize mid-range concentrations
+# Adjust weights to prioritize high concentration
+data_filtered_analyte <- data %>%
+  mutate(weight = case_when(
+    nM_Value >= 0.1 & nM_Value <= 0.3 ~ 1 / (Area_Ratio + 0.05),  # apply weight to low
+    TRUE ~ 1  # no weighting (constant weight) for medium and high
+  )) %>%
+  filter(
+    !is.na(weight) & !is.infinite(weight) &
+      !is.na(Area_Ratio) & !is.infinite(Area_Ratio) &
+      !is.na(nM_Value) & !is.infinite(nM_Value)
+  )
+
+# Filter the data to include only relevant pools (Calibration Sets)
+data_filtered <- data_filtered_analyte %>%
+  filter(Pool_Assignment %in% c("spk_food"))
+
+# Perform weighted polynomial regression for each compound and Pool_Assignment
+results <- data_filtered %>%
+  group_by(Molecule, Pool_Assignment) %>%
+  do({
+    # Fit a weighted polynomial regression model (2nd order polynomial for example)
+    model <- lm(adjusted_Area_Ratio ~ poly(nM_Value, 2, raw = TRUE), data = ., weights = .$weight)
+    
+    # Get the summary of the model
+    model_summary <- summary(model)
+    
+    # Calculate residuals and other statistics
+    residuals <- model$residuals
+    RSS <- sum(residuals^2)  # Residual sum of squares
+    
+    # Calculate standard errors of the slope and intercept
+    se_slope <- model_summary$coefficients[2, 2]  # Standard error of the slope
+    se_intercept <- model_summary$coefficients[1, 2]  # Standard error of the intercept
+    
+    # Residual standard error (RSE)
+    RSE <- sqrt(RSS / (length(residuals) - length(coef(model))))  # Residual Standard Error
+    r_squared <- model_summary$r.squared  # R-squared
+    
+    # Calculate the coefficient of variation (CV) and percent residual standard error
+    percent_rse <- (RSE / mean(.$adjusted_Area_Ratio, na.rm = TRUE)) * 100
+    cv <- (RSE / mean(.$adjusted_Area_Ratio, na.rm = TRUE)) * 100
+    
+    # ANOVA results
+    anova_result <- anova(model)
+    p_value <- anova_result[["Pr(>F)"]][1]
+    
+    # Retrieve coefficients (quadratic, linear, and intercept terms)
+    coeffs <- coef(model)
+    
+    # Build the quadratic equation as a string, including the intercept
+    quadratic_equation <- sprintf("y = %.4fx^2 + %.4fx + %.4f", coeffs[3], coeffs[2], coeffs[1])
+    
+    # Calculate LOD: (3.3 * standard deviation of intercept) / slope
+    LOD <- (3.3 * se_intercept) / coeffs[2]  # Using the linear term (b) as the slope
+    
+    # Calculate LOQ: (10 * standard deviation of intercept) / slope
+    LOQ <- (10 * se_intercept) / coeffs[2]  # Using the same slope (b)
+    
+    # Create a results data frame with RSE, RSS, LOD, LOQ, and other parameters
+    data.frame(
+      Molecule = unique(.$Molecule),
+      Pool_Assignment = unique(.$Pool_Assignment),
+      a = coeffs[3],  # Quadratic term
+      b = coeffs[2],  # Linear term (slope)
+      c = coeffs[1],  # intercept
+      Intercept = coeffs[1],  # Intercept
+      R_squared = r_squared,
+      RSE = RSE,  # Residual Standard Error
+      se_slope = se_slope,  # Standard deviation of the slope
+      se_intercept = se_intercept,  # Standard deviation of the intercept
+      RSS = RSS,  # Residual Sum of Squares
+      CV = cv,
+      Quadratic_Equation = quadratic_equation,
+      LOD = LOD,  # Limit of Detection
+      LOQ = LOQ   # Limit of Quantification
+    )
+  })
+
+# View the results with R² values, coefficients, quadratic equations, LOD, and LOQ
+print(results)
+
+# Filter the data to include only relevant pools (Calibration Sets)
+results_filtered <- results %>%
+  filter(Pool_Assignment %in% c("spk_food"))
+
+# Optionally, save the results to a CSV file
+write.csv(results_filtered, "food_only_weighted_regression_results_with_LOD_and_LOQ.csv", row.names = FALSE)
+
+
+
+
+
+
+#quantification using the peak area ratio of the food extract
+# quantitation of food biomarker
+library(dplyr)
+library(stringi)
+
+# Read the calibration results
+calibration_data_1 <- read.csv("Food_only_weighted_regression_results_with_LOD_and_LOQ.csv", check.names = FALSE)
+calibration_data <- calibration_data_1 %>%
+  filter(Pool_Assignment %in% c("spk_food"))
+
+# Read the dataset containing peak areas
+peak_area_data <- read.csv("quant_all_food_ingredients.csv", check.names = FALSE)
+
+# Standardize compound names to lowercase
+peak_area_data <- peak_area_data %>%
+  mutate(Molecule = stri_trans_tolower(Molecule))
+
+calibration_data <- calibration_data %>%
+  mutate(Molecule = stri_trans_tolower(Molecule))
+
+# Merge peak area data with calibration results based on the compound
+merged_data <- peak_area_data %>%
+  left_join(calibration_data, by = "Molecule")
+
+# Convert relevant columns to numeric, handling potential coercion issues
+merged_data <- merged_data %>%
+  mutate(
+    Quadratic_Coefficient = as.numeric(as.character(a)),
+    Slope = as.numeric(as.character(b)),  # Slope corresponds to the linear term
+    Intercept = as.numeric(as.character(c)),  # Intercept
+    Area_Ratio_sub = as.numeric(as.character(Area_Ratio_sub))
+  )
+
+# Check for NAs after conversion
+if (any(is.na(merged_data$Area_Ratio_sub))) {
+  warning("NAs found in Area_Ratio_sub after conversion. Please check the data.")
+}
+
+# Function to calculate concentration values using the quadratic model with intercept
+calculate_concentration_quadratic <- function(a, b, c, y_value) {
+  # Always calculate concentration, even for zero or NA Area_Ratio_sub (do not return 0 or NA directly)
+  
+  if (is.na(a) || is.na(b) || is.na(c)) {
+    return(c(NA, NA))  # Return NA if any coefficients are NA
+  }
+  
+  # Solve the equation: ax^2 + bx + (c - y_value) = 0
+  discriminant <- (b^2) - 4 * a * (c - y_value)  # Corrected to subtract y_value from c
+  
+  if (discriminant < 0) {
+    return(c(NA, NA))  # No real solution
+  }
+  
+  # Calculate two possible solutions
+  x1 <- (-b + sqrt(discriminant)) / (2 * a)
+  x2 <- (-b - sqrt(discriminant)) / (2 * a)
+  
+  # Return both concentration values, ensuring they are non-negative
+  return(c(max(x1, 0), max(x2, 0)))  # Ensure concentration values are non-negative
+}
+
+# Calculate concentrations for each peak area for **non-zero** Area_Ratio_sub
+merged_data <- merged_data %>%
+  rowwise() %>%
+  mutate(
+    Concentration1 = ifelse(Area_Ratio_sub > 0, calculate_concentration_quadratic(Quadratic_Coefficient, Slope, Intercept, Area_Ratio_sub)[1], NA),
+    Concentration2 = ifelse(Area_Ratio_sub > 0, calculate_concentration_quadratic(Quadratic_Coefficient, Slope, Intercept, Area_Ratio_sub)[2], NA)
+  ) %>%
+  ungroup()  # Ungroup after mutation
+
+
+# Print the results
+print(merged_data)
+
+# Assuming data_2 is your dataframe, and you want to select specific columns
+merged_data_1 <- merged_data %>%
+  dplyr::select(Molecule, `Replicate Name`, Area_Ratio_sub, Concentration1, `Precursor Mz`)  # Replace with your actual column names
+
+
+# Now group by Molecule and calculate the average Concentration, SD, and CV for Concentration
+results <- merged_data_1 %>%
+  # Create a new column that groups by the base of the Replicate Name (ignoring the suffix _1, _2, _3)
+  mutate(Replicate_Group = sub("_\\d$", "", `Replicate Name`)) %>%
+  group_by(Molecule, Replicate_Group) %>%
+  summarise(
+    Average_conc = mean(Concentration1, na.rm = TRUE),
+    Average_Area_Ratio_sub = mean(Area_Ratio_sub, na.rm = TRUE),
+    mz = mean(`Precursor Mz`, na.rm = TRUE),# Average of Concentration
+    SD = sd(Concentration1, na.rm = TRUE),  # Standard deviation of Concentration
+    CV = (sd(Concentration1, na.rm = TRUE) / mean(Concentration1, na.rm = TRUE)) * 100,  # CV = (SD / Mean) * 100
+    .groups = 'drop'  # Removes grouping after summarising
+  )
+# Read the CSV file (adjust the path to your actual file location)
+data2 <- read.csv("Metadata_500simplefood_QE_reformate_paper.csv", check.names = FALSE)
+
+# Merge data2 with results based on 'platemap' in data2 and 'Replicate_Group' in results
+merged_data <- data2 %>%
+  left_join(results, by = c("Platemap" = "Replicate_Group"))
+
+merged_data <- merged_data %>%
+  dplyr::select(Molecule,filename, Average_conc,mz, SD, CV,Average_Area_Ratio_sub, `description(reformat)`, sample_type_group1, sample_type_group2, sample_type_group3,sample_type_group4, sample_type_group5,sample_type_group6,weight)  # Replace with your actual column names
+
+df <- merged_data %>%
+  mutate(conc_mg_ml= (Average_conc*10^(-3) * mz))%>%
+  mutate(SD_mg_ml= (SD*10^(-3) * mz))
+
+
+# Create a new column for the normalized concentration (concentration_mg_ml /weight)
+Xf <- df %>%
+  mutate(Conc_ug = (conc_mg_ml/weight* 1000))%>%
+  mutate(SD_ug = (SD_mg_ml/weight* 1000))
+
+# View the updated dataset to check the new column
+head(Xf)
+
+# Filter relevant columns for further analysis and convert Molecule to lowercase
+df_filtered <- Xf %>%
+  dplyr::select(Molecule, Conc_ug, SD_ug, CV,filename, `description(reformat)`,sample_type_group1, sample_type_group2, sample_type_group3,sample_type_group4, sample_type_group5,sample_type_group6) %>%
+  mutate(Molecule = stri_trans_tolower(Molecule))  # or use tolower(Molecule) if you prefer base R
+
+# Read the CSV file (adjust the path to your actual file location)
+data3 <- read.csv("compound_hits_paper.csv", check.names = FALSE)
+
+# Merge data2 with results based on 'platemap' in data2 and 'Replicate_Group' in results
+merged_data <- data3 %>%
+  left_join(df_filtered, by = c("Molecule" = "Molecule"))
+
+# Optionally, save the results to a CSV file
+write.csv(df_filtered, "metaboanalyst_3Xfood_all_ingredients__quant.csv", row.names = FALSE)
+
+df_filtered <- merged_data %>%
+  mutate(
+    Conc_ug = ifelse(CV > 15, 0, Conc_ug),
+    Conc_ug = round(Conc_ug, 3),
+    CV = round(CV, 3),
+    SD_ug = round(SD_ug, 3)
+  )
+
+
+# Optionally, save the results to a CSV file
+write.csv(df_filtered, "food_all_ingredients__quant.csv", row.names = FALSE)
+
+
+
+#post recovery percentage validation
+library(dplyr)
+library(readr)
+
+# Read in the data
+data1 <- read_csv("matrix_plasma_quant_accuracy_precision.csv")
+
+# Step 1: Determine closest concentration to nM_Value
+data <- data_1 %>%
+  mutate(
+    Concentration1_diff = abs(Concentration1 - nM_Value),
+    Concentration2_diff = abs(Concentration2 - nM_Value)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    Closest_Concentration = if_else(Concentration1_diff <= Concentration2_diff, Concentration1, Concentration2),
+    Closest_Label = if_else(Concentration1_diff <= Concentration2_diff, "Concentration1", "Concentration2"),
+    Min_Diff = min(Concentration1_diff, Concentration2_diff)
+  ) %>%
+  ungroup()
+
+# Step 2: Calculate average Concentration1 for nsp_poolF replicates
+avg_concentration_nsp_poolP <- data %>%
+  filter(grepl("nsp_poolP", `Replicate Name`)) %>%
+  group_by(Molecule) %>%
+  summarise(Average_Concentration1_nsp_poolP = mean(Concentration1, na.rm = TRUE), .groups = 'drop')
+
+# Step 3: Join average concentration back into full dataset
+data <- data %>%
+  left_join(avg_concentration_nsp_poolP, by = "Molecule")
+
+# Step 4: Calculate accuracy using Average_Concentration1_nsp_poolF
+data <- data %>%
+  group_by(Molecule, `Replicate Name`) %>%
+  mutate(
+    Accuracy = abs((Closest_Concentration - Average_Concentration1_nsp_poolP) / nM_Value) * 100
+  ) %>%
+  ungroup()
+
+# Step 5: Define custom function to calculate CV
+calculate_cv <- function(x) {
+  x <- na.omit(x)
+  if (length(x) == 0 || mean(x) == 0) return(NA)
+  return(sd(x) / mean(x) * 100)
+}
+
+# Step 6: Calculate accuracy stats by Molecule and nM_Value
+results <- data %>%
+  group_by(Molecule, nM_Value) %>%
+  summarise(
+    Average_Accuracy = mean(Accuracy, na.rm = TRUE),
+    CV_Accuracy = calculate_cv(Accuracy),
+    .groups = 'drop'
+  )
+
+# Step 7: Filter to specific concentrations of interest
+results_filtered <- results %>%
+  filter(nM_Value %in% c(10, 2, 0.2))
+
+# Step 8: Save results to CSV
+write.csv(results_filtered, "percent recovery_lowconc_weight_percent_recovery.csv", row.names = FALSE)
+
+
+
+#accuracy and precision validation
+#accuracy and precision validation
+library(dplyr)
+library(readr)
+
+# Read in the data
+data2 <- read_csv("matrix_plasma_quant_accuracy_precision.csv")
+
+# Step 1: Determine closest concentration to nM_Value
+data <- data2 %>%
+  mutate(
+    Concentration1_diff = abs(Concentration1 - nM_Value),
+    Concentration2_diff = abs(Concentration2 - nM_Value)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    Closest_Concentration = if_else(Concentration1_diff <= Concentration2_diff, Concentration1, Concentration2),
+    Closest_Label = if_else(Concentration1_diff <= Concentration2_diff, "Concentration1", "Concentration2"),
+    Min_Diff = min(Concentration1_diff, Concentration2_diff)
+  ) %>%
+  ungroup()
+
+# Step 2: Calculate accuracy using Closest_Concentration / nM_Value
+data <- data %>%
+  group_by(Molecule, `Replicate Name`) %>%
+  mutate(
+    Accuracy = (Closest_Concentration / nM_Value) * 100
+  ) %>%
+  ungroup()
+
+# Step 3: Define custom function to calculate CV
+calculate_cv <- function(x) {
+  x <- na.omit(x)
+  if (length(x) == 0 || mean(x) == 0) return(NA)
+  return(sd(x) / mean(x) * 100)
+}
+
+# Step 4: Calculate accuracy stats by Molecule and nM_Value
+results <- data %>%
+  group_by(Molecule, nM_Value) %>%
+  summarise(
+    Average_Accuracy = mean(Accuracy, na.rm = TRUE),
+    CV_Accuracy = calculate_cv(Accuracy),
+    .groups = 'drop'
+  )
+
+# Step 5: Filter to specific concentrations of interest
+results_filtered <- results %>%
+  filter(nM_Value %in% c(10, 2, 0.4, 0.2))
+
+# Step 6: Save results to CSV
+write.csv(results_filtered, "intraday_accuracy_plasma_intday_lowconc_weight_percent_recovery.csv", row.names = FALSE)
+
+
+
