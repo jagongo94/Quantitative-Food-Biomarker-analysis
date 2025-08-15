@@ -1,3 +1,5 @@
+
+
 # Creation of peak area/internal standard results from skyline output
 # Creation of peak area/internal standard results from skyline output
 library(dplyr)
@@ -199,6 +201,7 @@ df <- read_csv("neat_fecal_food_matrix_area_ratio_pool.csv")
 data <- df %>%
   filter(!Molecule %in% c("sulfadimethoxine")) %>%
   filter(!`Replicate Name` %in% c("blank_carryF_1", "blank_carryF_2", "blank_carryF_3"))
+  filter(!grepl("8", nM_Value)) %>%
 
 # Ensure 'nM_Value' and 'adjusted_Area_Ratio' are numeric
 data$nM_Value <- as.numeric(data$nM_Value)
@@ -209,7 +212,7 @@ data$adjusted_Area_Ratio <- as.numeric(data$adjusted_Area_Ratio)
 # Adjust weights to prioritize high concentration
 data_filtered_analyte <- data %>%
   mutate(weight = case_when(
-    nM_Value >= 0.1 & nM_Value <= 0.3 ~ 1 / (Area_Ratio + 0.05),  # apply weight to low
+    nM_Value >= 0.1 & nM_Value <= 0.6 ~ 1 / (Area_Ratio + 0.05),  # apply weight to low
     TRUE ~ 1  # no weighting (constant weight) for medium and high
   )) %>%
   filter(
@@ -438,8 +441,22 @@ df_filtered <- merged_data %>%
   )
 
 
+# Step 2: Select top 5 concentrations per Molecule and filter descriptions
+df_top5 <- df_filtered %>%
+  group_by(Molecule) %>%
+  top_n(5, Conc_ug) %>%
+  ungroup() %>%
+  filter(!is.na(`description(reformat)`))
+
+# Step 3: Filter based on 5% of max Conc_ug within each Molecule
+df_filtered_5percent_less <- df_top5 %>%
+  group_by(Molecule) %>%
+  filter(Conc_ug >= 0.05 * max(Conc_ug, na.rm = TRUE)) %>%
+  ungroup()
+
+
 # Optionally, save the results to a CSV file
-write.csv(df_filtered, "food_all_ingredients__quant.csv", row.names = FALSE)
+write.csv(df_filtered_5percent_less, "food_all_ingredients__quant.csv", row.names = FALSE)
 
 
 
@@ -562,3 +579,84 @@ write.csv(results_filtered, "intraday_accuracy_plasma_intday_lowconc_weight_perc
 
 
 
+
+# Building calibration curve (linear model)
+library(ggplot2)
+library(dplyr)
+library(readr)
+
+# Read in the CSV file
+df <- read_csv("neat_fecal_food_matrix_area_ratio_pool.csv")
+
+# Data filtering and preprocessing
+data <- df %>%
+  filter(!Molecule %in% c("sulfadimethoxine")) %>%
+  filter(!`Replicate Name` %in% c("blank_carryF_1", "blank_carryF_2", "blank_carryF_3")) %>%
+  mutate(
+    nM_Value = as.numeric(nM_Value),
+    adjusted_Area_Ratio = as.numeric(adjusted_Area_Ratio)
+  )
+
+# Weighting low concentrations more
+data_filtered_analyte <- data %>%
+  mutate(weight = case_when(
+    nM_Value >= 0.1 & nM_Value <= 0.6 ~ 1 / (Area_Ratio + 0.05),
+    TRUE ~ 1
+  )) %>%
+  filter(
+    !is.na(weight) & !is.infinite(weight),
+    !is.na(Area_Ratio) & !is.infinite(Area_Ratio),
+    !is.na(nM_Value) & !is.infinite(nM_Value)
+  )
+
+# Filter for calibration samples
+data_filtered <- data_filtered_analyte %>%
+  filter(Pool_Assignment %in% c("spk_food"))
+
+# Perform linear regression (degree 1 polynomial)
+results <- data_filtered %>%
+  group_by(Molecule, Pool_Assignment) %>%
+  do({
+    model <- lm(adjusted_Area_Ratio ~ poly(nM_Value, 1, raw = TRUE), data = ., weights = .$weight)
+    model_summary <- summary(model)
+    residuals <- model$residuals
+    RSS <- sum(residuals^2)
+    RSE <- sqrt(RSS / (length(residuals) - length(coef(model))))
+    r_squared <- model_summary$r.squared
+    se_slope <- model_summary$coefficients[2, 2]
+    se_intercept <- model_summary$coefficients[1, 2]
+    cv <- (RSE / mean(.$adjusted_Area_Ratio, na.rm = TRUE)) * 100
+    
+    # Coefficients (b = slope, c = intercept)
+    coeffs <- coef(model)
+    linear_equation <- sprintf("y = %.4fx + %.4f", coeffs[2], coeffs[1])
+    
+    # LOD and LOQ
+    LOD <- (3.3 * se_intercept) / coeffs[2]
+    LOQ <- (10 * se_intercept) / coeffs[2]
+    
+    data.frame(
+      Molecule = unique(.$Molecule),
+      Pool_Assignment = unique(.$Pool_Assignment),
+      b = coeffs[2],  # Slope
+      c = coeffs[1],  # Intercept
+      Intercept = coeffs[1],
+      R_squared = r_squared,
+      RSE = RSE,
+      se_slope = se_slope,
+      se_intercept = se_intercept,
+      RSS = RSS,
+      CV = cv,
+      Linear_Equation = linear_equation,
+      LOD = LOD,
+      LOQ = LOQ
+    )
+  })
+
+# Print and save results
+print(results)
+
+results_filtered <- results %>%
+  filter(Pool_Assignment %in% c("spk_food"))
+
+write.csv(results_filtered, "food_only_linear_regression_results_with_LOD_and_LOQ.csv", row.names = FALSE)
